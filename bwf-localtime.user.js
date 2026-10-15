@@ -3,7 +3,7 @@
 // @namespace    https://github.com/dfilippovsky/bwf-localtime
 // @version      1.2.0
 // @description  Shows BWF World Tour match start times in your own timezone instead of the stadium's.
-// @author       Dan Filippovsky
+// @author       DF
 // @license      MIT
 // @homepageURL  https://github.com/dfilippovsky/bwf-localtime
 // @supportURL   https://github.com/dfilippovsky/bwf-localtime/issues
@@ -129,7 +129,8 @@
 
     function transformedText(xhr) {
         const raw = textDesc.get.call(xhr);
-        if (!xhr.__bwfLocalize || xhr.readyState !== 4 || !raw) return raw;
+        // Server errors (5xx HTML pages etc.) are BWF's problem, not a format change — pass them through.
+        if (!xhr.__bwfLocalize || xhr.readyState !== 4 || !raw || xhr.status < 200 || xhr.status > 299) return raw;
         if (xhr.__bwfCache && xhr.__bwfCache.raw === raw) return xhr.__bwfCache.out;
         const out = localizeText(raw);
         xhr.__bwfCache = { raw, out };
@@ -154,10 +155,11 @@
     const origFetch = window.fetch;
     if (typeof origFetch === 'function') {
         window.fetch = function (input) {
-            const url = typeof input === 'string' ? input : input && input.url;
+            // input may be a string, a URL object or a Request.
+            const url = input instanceof Request ? input.url : String(input);
             const p = origFetch.apply(this, arguments);
-            if (!API_RE.test(String(url))) return p;
-            return p.then(res => res.clone().text().then(raw => {
+            if (!API_RE.test(url)) return p;
+            return p.then(res => !res.ok ? res : res.clone().text().then(raw => {
                 const out = localizeText(raw);
                 if (out === raw) return res;
                 const headers = new Headers(res.headers);
@@ -177,7 +179,8 @@
         location.reload();
     }, true);
 
-    // Browsers may still report legacy IANA aliases (e.g. Chrome on Windows gives "Europe/Kiev").
+    // Browsers may still report legacy IANA aliases: Intl follows CLDR, whose canonical IDs lag
+    // behind IANA renames (e.g. "Europe/Kiev" instead of "Europe/Kyiv").
     const TZ_ALIASES = {
         'Europe/Kiev': 'Europe/Kyiv',
         'Europe/Uzhgorod': 'Europe/Kyiv',
