@@ -29,6 +29,10 @@ The script declares `@updateURL`/`@downloadURL`, so the manager picks up new ver
 > Chrome/Edge: Tampermonkey requires *Allow User Scripts* (or Developer mode) to be enabled
 > in the extension settings.
 
+> Violentmonkey: the script declares `@inject-into page`, because it must patch the page's own
+> `XMLHttpRequest`/`fetch`. If the badge stays `TZ: n/a` on a schedule page, check that the
+> script's injection mode isn't overridden to *content* in Violentmonkey's settings.
+
 ## Usage
 
 - A badge in the top-left corner (just below the red site header) shows which time is displayed:
@@ -39,8 +43,14 @@ The script declares `@updateURL`/`@downloadURL`, so the manager picks up new ver
 - The site's own **Stadium Time / Your Time** buttons (which do nothing on the original site)
   also switch the mode.
 - The choice is stored in `localStorage` (`bwfLocalTime.mode`).
-- `TZ: n/a` means the BWF API answered in an unexpected format (e.g. no `matchTimeUtc`). The script
-  then leaves the response untouched, so the page shows the original stadium times and keeps working.
+- Badge states:
+  - `TZ: Europe/Kyiv` (red) — times are converted.
+  - Dimmed badge — no schedule has been loaded on this page yet (normal on non-schedule pages).
+  - `TZ: Europe/Kyiv ⚠` (amber) — some matches had no UTC time and still show stadium time;
+    hover the badge to see how many.
+  - `TZ: n/a` (amber) — the schedule couldn't be converted: the BWF API answered in an unexpected
+    format, or on a `results/<date>` page no schedule request was intercepted within 15 s. The script
+    then leaves the response untouched, so the page shows the original stadium times and keeps working.
 
 ## Limitations
 
