@@ -94,10 +94,22 @@
         location.reload();
     }, true);
 
+    // Browsers may still report legacy IANA aliases (e.g. Chrome on Windows gives "Europe/Kiev").
+    const TZ_ALIASES = {
+        'Europe/Kiev': 'Europe/Kyiv',
+        'Europe/Uzhgorod': 'Europe/Kyiv',
+        'Europe/Zaporozhye': 'Europe/Kyiv',
+        'Asia/Calcutta': 'Asia/Kolkata',
+        'Asia/Saigon': 'Asia/Ho_Chi_Minh',
+        'Asia/Katmandu': 'Asia/Kathmandu',
+        'Asia/Rangoon': 'Asia/Yangon',
+    };
+
     // Small badge so it's obvious which time is shown.
     function addBadge() {
         if (document.getElementById('bwf-localtime-badge')) return;
-        const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const rawTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        const tz = TZ_ALIASES[rawTz] || rawTz;
         const local = getMode() === 'local';
         const b = document.createElement('div');
         b.id = 'bwf-localtime-badge';
