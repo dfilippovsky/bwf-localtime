@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWF World Tour — local match times
 // @namespace    https://github.com/dfilippovsky/bwf-localtime
-// @version      1.1.0
+// @version      1.2.0
 // @description  Shows BWF World Tour match start times in your own timezone instead of the stadium's.
 // @author       Dan Filippovsky
 // @license      MIT
@@ -11,6 +11,7 @@
 // @updateURL    https://raw.githubusercontent.com/dfilippovsky/bwf-localtime/master/bwf-localtime.user.js
 // @match        https://bwfworldtour.bwfbadminton.com/*
 // @run-at       document-start
+// @inject-into  page
 // @grant        none
 // ==/UserScript==
 
@@ -20,6 +21,8 @@
     // The schedule widget fetches matches from this endpoint (axios -> XMLHttpRequest).
     const API_RE = /extranet-lv\.bwfbadminton\.com\/api\/tournaments\/day-matches(\?|$)/;
     const STORAGE_KEY = 'bwfLocalTime.mode'; // 'local' | 'stadium'
+    // If a schedule page hasn't delivered a day-matches response by then, interception is broken.
+    const PENDING_TIMEOUT_MS = 15000;
 
     function getMode() {
         try { return localStorage.getItem(STORAGE_KEY) || 'local'; } catch (e) { return 'local'; }
@@ -31,8 +34,9 @@
     const pad = n => String(n).padStart(2, '0');
     const DATE_TIME_RE = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?/;
 
-    // 'ok' — times converted; 'na' — the API answered in an unexpected format, times left as is.
-    let status = 'ok';
+    // 'pending' — no schedule response seen yet; 'ok' — all times converted;
+    // 'partial' — some matches had no usable UTC time; 'na' — unexpected format, times left as is.
+    const state = { status: 'pending', matches: 0, converted: 0 };
 
     // "2026-10-15 07:00:00" (UTC) -> "2026-10-15 09:00:00" in the browser's timezone.
     function utcToLocalString(utc) {
@@ -50,8 +54,8 @@
         return Math.round((Date.UTC(+b[1], b[2] - 1, +b[3]) - Date.UTC(+a[1], a[2] - 1, +a[3])) / 864e5);
     }
 
-    // Local "HH:MM" -> { shift, date } for matches that land on another day in the user's zone.
-    // Filled while localizing, used to put "+1"/"−1" marks next to the rendered times.
+    // Local "HH:MM" -> { shift, date } for the latest schedule response.
+    // Used to put "+1"/"−1" marks next to rendered times that land on another day in the user's zone.
     const shiftedTimes = new Map();
 
     function rememberShift(stadium, local) {
@@ -69,9 +73,9 @@
         if (Array.isArray(node)) {
             node.forEach(v => localize(v, stats));
         } else if (node && typeof node === 'object') {
-            if ('matchTime' in node) stats.matches++;
-            if (typeof node.matchTimeUtc === 'string' && typeof node.matchTime === 'string') {
-                const local = utcToLocalString(node.matchTimeUtc);
+            if (typeof node.matchTime === 'string' && node.matchTime) {
+                stats.matches++;
+                const local = typeof node.matchTimeUtc === 'string' && utcToLocalString(node.matchTimeUtc);
                 if (local) {
                     node.matchTimeStadium = node.matchTime;
                     node.matchTime = local;
@@ -84,9 +88,33 @@
         return stats;
     }
 
-    function setStatus(s) {
-        status = s;
+    function setStatus(status, stats) {
+        state.status = status;
+        state.matches = stats ? stats.matches : 0;
+        state.converted = stats ? stats.converted : 0;
         updateBadge();
+    }
+
+    // Raw day-matches JSON -> localized JSON. Never breaks the page: on any surprise the
+    // original text is returned untouched.
+    function localizeText(raw) {
+        if (getMode() !== 'local' || !raw) return raw;
+        try {
+            const data = JSON.parse(raw);
+            shiftedTimes.clear(); // a new day was loaded — forget the previous one
+            const stats = localize(data);
+            if (stats.matches > 0 && stats.converted === 0) {
+                shiftedTimes.clear();
+                setStatus('na', stats); // matches are there, but without a usable matchTimeUtc
+                return raw;
+            }
+            setStatus(stats.converted < stats.matches ? 'partial' : 'ok', stats);
+            scheduleMarkDays();
+            return JSON.stringify(data);
+        } catch (e) {
+            setStatus('na');
+            return raw;
+        }
     }
 
     // Patch XMLHttpRequest so the page's Vue component receives already-localized times.
@@ -99,27 +127,12 @@
     const textDesc = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, 'responseText');
     const respDesc = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, 'response');
 
-    // Never break the page: on any surprise return the original response untouched.
     function transformedText(xhr) {
         const raw = textDesc.get.call(xhr);
-        if (!xhr.__bwfLocalize || getMode() !== 'local' || xhr.readyState !== 4 || !raw) return raw;
+        if (!xhr.__bwfLocalize || xhr.readyState !== 4 || !raw) return raw;
         if (xhr.__bwfCache && xhr.__bwfCache.raw === raw) return xhr.__bwfCache.out;
-        let out = raw;
-        try {
-            const data = JSON.parse(raw);
-            const stats = localize(data);
-            if (stats.matches > 0 && stats.converted === 0) {
-                setStatus('na'); // matches are there, but without a usable matchTimeUtc
-            } else {
-                out = JSON.stringify(data);
-                if (stats.converted) setStatus('ok');
-            }
-        } catch (e) {
-            out = raw;
-            setStatus('na');
-        }
+        const out = localizeText(raw);
         xhr.__bwfCache = { raw, out };
-        scheduleMarkDays();
         return out;
     }
 
@@ -136,6 +149,23 @@
             return respDesc.get.call(this);
         },
     });
+
+    // The site uses XHR today; cover fetch too in case it switches.
+    const origFetch = window.fetch;
+    if (typeof origFetch === 'function') {
+        window.fetch = function (input) {
+            const url = typeof input === 'string' ? input : input && input.url;
+            const p = origFetch.apply(this, arguments);
+            if (!API_RE.test(String(url))) return p;
+            return p.then(res => res.clone().text().then(raw => {
+                const out = localizeText(raw);
+                if (out === raw) return res;
+                const headers = new Headers(res.headers);
+                headers.delete('content-length');
+                return new Response(out, { status: res.status, statusText: res.statusText, headers });
+            }, () => res));
+        };
+    }
 
     // The site already has "Stadium Time / Your Time" buttons that do nothing. Make them work.
     document.addEventListener('click', e => {
@@ -158,6 +188,8 @@
         'Asia/Rangoon': 'Asia/Yangon',
     };
 
+    let placeBadge = () => {};
+
     // Small badge so it's obvious which time is shown.
     function addBadge() {
         if (document.getElementById('bwf-localtime-badge')) return;
@@ -172,7 +204,7 @@
         });
         document.body.appendChild(b);
         updateBadge();
-        followHeader(b);
+        placeBadge = followHeader(b);
     }
 
     function updateBadge() {
@@ -180,24 +212,46 @@
         if (!b) return;
         const rawTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
         const tz = TZ_ALIASES[rawTz] || rawTz;
-        let text = `TZ: ${tz}`, bg = '#df2027', title = 'Click to switch between your time and stadium time';
+        const hint = 'Click to switch between your time and stadium time.';
+        let text = `TZ: ${tz}`, bg = '#df2027', opacity = '1', title = hint;
         if (getMode() !== 'local') {
             text = 'TZ: Stadium';
             bg = '#6e7781';
-        } else if (status === 'na') {
+        } else if (state.status === 'pending') {
+            opacity = '.6';
+            title = 'No match schedule has been loaded on this page yet.\n' + hint;
+        } else if (state.status === 'partial') {
+            text = `TZ: ${tz} ⚠`;
+            bg = '#9a6700';
+            title = `${state.matches - state.converted} of ${state.matches} matches have no UTC time ` +
+                'and still show stadium time.\n' + hint;
+        } else if (state.status === 'na') {
             text = 'TZ: n/a';
             bg = '#9a6700';
-            title = 'The BWF API returned data in an unexpected format, so the original stadium times ' +
-                'are shown. Click to switch to stadium mode.';
+            title = 'The match schedule could not be converted (the BWF API answered in an unexpected ' +
+                'format, or its request was not intercepted), so stadium times are shown.\n' + hint;
         }
         b.textContent = text;
         b.title = title;
         b.style.background = bg;
+        b.style.opacity = opacity;
     }
 
-    // Mark rendered times whose local day differs from the stadium day: "02:00 +1".
+    // On a schedule page, staying 'pending' means the request was never intercepted
+    // (e.g. the site switched transport, or the script runs in an isolated context).
+    function watchPending() {
+        setTimeout(() => {
+            if (state.status === 'pending' && getMode() === 'local' && /\/results\//.test(location.pathname)) {
+                setStatus('na');
+            }
+        }, PENDING_TIMEOUT_MS);
+    }
+
+    // Mark rendered times whose local day differs from the stadium day: "Est. 2:00 AM +1".
     // The widget's markup is not ours, so look for text nodes that are exactly a shifted time.
     const MARK_CLASS = 'bwf-localtime-day';
+    // No trailing \b: textContent glues "15 OCT" to the next line ("15 OCTFollowed By").
+    const CARD_DATE_RE = /\b\d{1,2}\s+(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)/i;
 
     // "9:05", "09:05", "Est. 9:05 PM" -> "09:05" / "21:05"; anything else -> null.
     function timeKey(text) {
@@ -206,6 +260,18 @@
         let h = +m[1];
         if (m[3]) h = (h % 12) + (/p/i.test(m[3]) ? 12 : 0);
         return `${pad(h)}:${m[2]}`;
+    }
+
+    // Only times inside a match card's time box ("15 OCT / Followed By / Est. 8:00 PM") count,
+    // so unrelated "02:00" strings elsewhere on the page are left alone.
+    function inMatchCard(node) {
+        let el = node.parentElement;
+        for (let i = 0; el && i < 4; i++, el = el.parentElement) {
+            const t = el.textContent;
+            if (t.length > 300) return false;
+            if (CARD_DATE_RE.test(t)) return true;
+        }
+        return false;
     }
 
     function markDays() {
@@ -220,7 +286,7 @@
             if (!info || !info.shift) continue;
             const next = n.nextSibling;
             if (next && next.classList && next.classList.contains(MARK_CLASS)) continue;
-            hits.push([n, info]);
+            if (inMatchCard(n)) hits.push([n, info]);
         }
         hits.forEach(([n, info]) => {
             const s = document.createElement('sup');
@@ -238,11 +304,14 @@
         markTimer = setTimeout(markDays, 50);
     }
 
-    // Vue re-renders the list (tab switches, live updates), so re-apply marks after DOM changes.
-    function observeSchedule() {
+    // Vue re-renders the list (tab switches, live updates) and may swap the header,
+    // so re-apply marks and re-place the badge after DOM changes.
+    function observeDom() {
         const isMark = node => node.classList && node.classList.contains(MARK_CLASS);
         new MutationObserver(muts => {
-            if (muts.some(m => m.type !== 'childList' || ![...m.addedNodes].every(isMark))) scheduleMarkDays();
+            if (muts.every(m => m.type === 'childList' && [...m.addedNodes].every(isMark))) return;
+            scheduleMarkDays();
+            placeBadge(true);
         }).observe(document.body, { childList: true, subtree: true, characterData: true });
     }
 
@@ -257,23 +326,53 @@
         return best;
     }
 
-    // Keep the badge just below the header every frame, so it moves together with the header
-    // while it shrinks/grows on scroll; once the header scrolls away, stick to the top.
+    // Keep the badge just below the header, which shrinks/grows on scroll; once the header scrolls
+    // away, stick to the top. Only recomputed on scroll, resize, header resize and DOM changes —
+    // no per-frame loop. Returns a function that schedules a re-placement.
     function followHeader(b) {
-        let header = null, lastY = null, frame = 0;
-        (function tick() {
-            // Vue renders the header late and may swap it, so re-detect it now and then.
-            if (!header || !header.isConnected || frame++ % 60 === 0) header = findHeader();
+        let header = null, lastY = null, queued = false, redetect = true, settleTimer = 0;
+        const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(() => schedule()) : null;
+
+        function place() {
+            queued = false;
+            if (redetect || !header || !header.isConnected) {
+                redetect = false;
+                const h = findHeader();
+                if (h !== header) {
+                    if (ro) { ro.disconnect(); if (h) ro.observe(h); }
+                    header = h;
+                }
+            }
             const bottom = header ? header.getBoundingClientRect().bottom : 72;
             const y = Math.round(Math.max(8, bottom + 8));
             if (y !== lastY) { b.style.transform = `translateY(${y}px)`; lastY = y; }
-            requestAnimationFrame(tick);
-        })();
+        }
+
+        function schedule(findAgain) {
+            if (findAgain) redetect = true;
+            if (queued) return;
+            queued = true;
+            requestAnimationFrame(place);
+        }
+
+        function onScroll() {
+            schedule();
+            // The header may animate after scrolling stops (CSS transition) — settle once more.
+            clearTimeout(settleTimer);
+            settleTimer = setTimeout(() => schedule(), 350);
+        }
+
+        window.addEventListener('scroll', onScroll, { passive: true });
+        window.addEventListener('resize', () => schedule(true), { passive: true });
+        schedule(true);
+        return schedule;
     }
+
     function init() {
         addBadge();
-        observeSchedule();
+        observeDom();
         scheduleMarkDays();
+        watchPending();
     }
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
