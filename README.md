@@ -43,7 +43,9 @@ The script declares `@updateURL`/`@downloadURL`, so the manager picks up new ver
 - The site's markup also contains **Stadium Time / Your Time** filter buttons, but they are
   currently commented out, so you won't see them (see [Proofs](#proofs)). If the site ever shows
   them again, the script hooks them up too, so they switch the mode just like the badge.
-- The choice is stored in `localStorage` (`bwfLocalTime.mode`).
+- The choice is stored in the userscript manager's own storage (`GM_getValue`/`GM_setValue`, key
+  `bwfLocalTime.mode`), because the site wipes its `localStorage` and cookies on load (seen with
+  rejected cookie consent). `localStorage` and the `bwfLocalTimeMode` cookie are only a fallback.
 - Badge states:
   - `TZ: Europe/Kyiv` (red) — times are converted.
   - Dimmed badge — no schedule has been loaded on this page yet (normal on non-schedule pages).
