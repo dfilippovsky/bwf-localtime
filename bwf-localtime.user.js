@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BWF World Tour — local match times
 // @namespace    https://github.com/dfilippovsky/bwf-localtime
-// @version      1.2.0
+// @version      1.3.0
 // @description  Shows BWF World Tour match start times in your own timezone instead of the stadium's.
 // @author       DF
 // @license      MIT
@@ -12,7 +12,8 @@
 // @match        https://bwfworldtour.bwfbadminton.com/*
 // @run-at       document-start
 // @inject-into  page
-// @grant        none
+// @grant        GM_getValue
+// @grant        GM_setValue
 // ==/UserScript==
 
 (function () {
@@ -24,11 +25,29 @@
     // If a schedule page hasn't delivered a day-matches response by then, interception is broken.
     const PENDING_TIMEOUT_MS = 15000;
 
+    // With GM_* grants the page's globals must be reached through unsafeWindow.
+    const W = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+
+    // The mode lives in the userscript manager's storage: once cookie consent is rejected, the site
+    // wipes its own localStorage and cookies on every load. localStorage and a cookie are only
+    // a fallback for managers without GM_getValue/GM_setValue.
+    const HAS_GM = typeof GM_getValue === 'function' && typeof GM_setValue === 'function';
+    const COOKIE_RE = /(?:^|;\s*)bwfLocalTimeMode=(local|stadium)(?:;|$)/;
+    const isMode = v => v === 'local' || v === 'stadium';
     function getMode() {
-        try { return localStorage.getItem(STORAGE_KEY) || 'local'; } catch (e) { return 'local'; }
+        let mode = null;
+        if (HAS_GM) { try { mode = GM_getValue(STORAGE_KEY, null); } catch (e) { /* ignore */ } }
+        if (!isMode(mode)) { try { mode = localStorage.getItem(STORAGE_KEY); } catch (e) { /* ignore */ } }
+        if (!isMode(mode)) {
+            const m = COOKIE_RE.exec(document.cookie);
+            mode = m ? m[1] : 'local';
+        }
+        return mode;
     }
     function setMode(mode) {
+        if (HAS_GM) { try { GM_setValue(STORAGE_KEY, mode); } catch (e) { /* ignore */ } }
         try { localStorage.setItem(STORAGE_KEY, mode); } catch (e) { /* ignore */ }
+        document.cookie = `bwfLocalTimeMode=${mode}; path=/; max-age=31536000; SameSite=Lax`;
     }
 
     const pad = n => String(n).padStart(2, '0');
@@ -118,14 +137,15 @@
     }
 
     // Patch XMLHttpRequest so the page's Vue component receives already-localized times.
-    const origOpen = XMLHttpRequest.prototype.open;
-    XMLHttpRequest.prototype.open = function (method, url) {
+    const XHR = W.XMLHttpRequest.prototype;
+    const origOpen = XHR.open;
+    XHR.open = function (method, url) {
         this.__bwfLocalize = API_RE.test(String(url));
         return origOpen.apply(this, arguments);
     };
 
-    const textDesc = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, 'responseText');
-    const respDesc = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, 'response');
+    const textDesc = Object.getOwnPropertyDescriptor(XHR, 'responseText');
+    const respDesc = Object.getOwnPropertyDescriptor(XHR, 'response');
 
     function transformedText(xhr) {
         const raw = textDesc.get.call(xhr);
@@ -137,11 +157,11 @@
         return out;
     }
 
-    Object.defineProperty(XMLHttpRequest.prototype, 'responseText', {
+    Object.defineProperty(XHR, 'responseText', {
         configurable: true,
         get() { return transformedText(this); },
     });
-    Object.defineProperty(XMLHttpRequest.prototype, 'response', {
+    Object.defineProperty(XHR, 'response', {
         configurable: true,
         get() {
             if (this.__bwfLocalize && (this.responseType === '' || this.responseType === 'text')) {
@@ -152,25 +172,28 @@
     });
 
     // The site uses XHR today; cover fetch too in case it switches.
-    const origFetch = window.fetch;
+    const origFetch = W.fetch;
     if (typeof origFetch === 'function') {
-        window.fetch = function (input) {
+        W.fetch = function (input) {
             // input may be a string, a URL object or a Request.
-            const url = input instanceof Request ? input.url : String(input);
+            const url = input instanceof W.Request ? input.url : String(input);
             const p = origFetch.apply(this, arguments);
             if (!API_RE.test(url)) return p;
             return p.then(res => !res.ok ? res : res.clone().text().then(raw => {
                 const out = localizeText(raw);
                 if (out === raw) return res;
-                const headers = new Headers(res.headers);
+                const headers = new W.Headers(res.headers);
                 headers.delete('content-length');
-                return new Response(out, { status: res.status, statusText: res.statusText, headers });
+                return new W.Response(out, { status: res.status, statusText: res.statusText, headers });
             }, () => res));
         };
     }
 
     // The site already has "Stadium Time / Your Time" buttons that do nothing. Make them work.
+    // Only real user clicks: the page itself may "click" its default button on load,
+    // which would otherwise reset the mode right after the badge switched it.
     document.addEventListener('click', e => {
+        if (!e.isTrusted) return;
         const btn = e.target.closest && e.target.closest('input[type="button"]');
         if (!btn) return;
         const mode = btn.value === 'Your Time' ? 'local' : btn.value === 'Stadium Time' ? 'stadium' : null;
