@@ -59,6 +59,23 @@ The script declares `@updateURL`/`@downloadURL`, so the manager picks up new ver
   fall on another day in your zone.
 - `extranet-lv.bwfbadminton.com` is an undocumented internal API and may change without notice.
 
+## Companion script: Match Centre popup skipper
+
+[match-centre.bwfbadminton.com](https://match-centre.bwfbadminton.com/) shows a
+"Stay Updated with BWF — Download the Badminton4u App" popup on every visit.
+**[bwf-matchcentre.user.js (raw)](https://raw.githubusercontent.com/dfilippovsky/bwf-localtime/master/bwf-matchcentre.user.js)**
+(installed separately, same way as above):
+
+- stops that popup from showing at all. The site's own × button remembers your choice in the
+  `hero_app_banner_closed` cookie for just one day; the script sets it (and `bannerClosed` for the
+  mobile bottom banner) for 400 days (Chrome’s maximum; refreshed on every visit), and also hides
+  `.hero-app-banner` via CSS as a fallback;
+- on a tournament landing page (`https://match-centre.bwfbadminton.com/<id>`) follows the
+  **Order of Play** button in the same tab.
+- The redirect only happens on a fresh visit: coming back with *Back* or reloading the page keeps
+  you on the match centre. To disable the redirect entirely, set `AUTO_ORDER_OF_PLAY = false` at
+  the top of the script.
+
 ## License
 
 [MIT](LICENSE)
